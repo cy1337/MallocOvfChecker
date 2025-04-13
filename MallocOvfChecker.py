@@ -13,28 +13,6 @@ monitor = ConsoleTaskMonitor()
 decomp_interface = DecompInterface()
 decomp_interface.openProgram(currentProgram)
 
-class MallocWarning(AddressableRowObject):
-    def __init__(self, funcName, callAddr, inflAddr, opType):
-        self.funcName = funcName
-        self._address = callAddr
-        self.inflAddr = inflAddr
-        self.opType = opType
-
-    def __str__(self):
-        return "{}: call at {} influenced by {} at {}".format(self.funcName, self._address, self.opType, self.inflAddr)
-
-    def getAddress(self):
-        return self._address
-
-    def getFunction(self):
-        return self.funcName
-
-    def getOpType(self):
-        return self.opType
-
-    def getOpLocation(self):
-        return str(self.inflAddr)
-
 # Perform backward slice from a varnode
 def backward_slice(varnode, visited=None, collected=None):
     if visited is None:
@@ -61,7 +39,8 @@ def find_add_or_mult_op(influencing_ops):
                     return (op.getSeqnum().getTarget(), op.getMnemonic())
     return None
 
-def check_func(func):
+# Decompile a function and check for questionable malloc calls
+def check_func(func, malloc_addr):
     entries = []
     decompiled = decomp_interface.decompileFunction(func, 60, monitor)
     if not decompiled.decompileCompleted():
@@ -82,46 +61,67 @@ def check_func(func):
                 entries.append(MallocWarning(func.getName(), op.getSeqnum().getTarget(), infl_addr, op_type))
     return entries
 
-malloc_addr = None
-function_manager = currentProgram.getFunctionManager()
-for f in function_manager.getFunctions(True):
-    if f.getName() == "malloc":
-        malloc_addr = f.getEntryPoint()
-        break
-if malloc_addr is None:
-    print("[ * ] No malloc symbol found")
-    exit()
+# Inspect currentProgram for suspicious malloc calls
+def check_program():
+    malloc_addr = None
+    function_manager = currentProgram.getFunctionManager()
+    for f in function_manager.getFunctions(True):
+        if f.getName() == "malloc":
+            malloc_addr = f.getEntryPoint()
+            break
+    if malloc_addr is None:
+        print("[ * ] No malloc symbol found")
+        exit()
 
-calling_funcs = set()
-for ref in getReferencesTo(malloc_addr):
-    if ref.getReferenceType() != RefType.UNCONDITIONAL_CALL:
-        continue
-    func = getFunctionContaining(ref.getFromAddress())
-    if func is None or func in calling_funcs:
-        continue
-    calling_funcs.add(func)
+    calling_funcs = set()
+    for ref in getReferencesTo(malloc_addr):
+        if ref.getReferenceType() != RefType.UNCONDITIONAL_CALL:
+            continue
+        func = getFunctionContaining(ref.getFromAddress())
+        if func is None or func in calling_funcs:
+            continue
+        calling_funcs.add(func)
 
-warnings = []
-for func in calling_funcs:
-    warnings.extend(check_func(func))
+    warnings = []
+    for func in calling_funcs:
+        warnings.extend(check_func(func, malloc_addr))
 
-if warnings:
-    for w in warnings:
-        print(str(w))
+    if warnings:
+        for w in warnings:
+            print(str(w))
 
-    class WarningExecutor(TableChooserExecutor):
-        def __init__(self):
-            TableChooserExecutor.__init__(self)
+        class WarningExecutor(TableChooserExecutor):
+            def __init__(self):
+                TableChooserExecutor.__init__(self)
 
-        def execute(self, warning):
-            goTo(warning.getAddress())
+            def execute(self, warning):
+                goTo(warning.getAddress())
 
-        def getButtonName(self):
-            return "Go To Call"
+            def getButtonName(self):
+                return "Go To Call"
 
-    dialog = createTableChooserDialog("Malloc Arithmetic", WarningExecutor())
-    for row in warnings:
-        dialog.add(row)
-    dialog.show()
-else:
-    print("No issues found with malloc argument calculations.")
+        dialog = createTableChooserDialog("Malloc Arithmetic", WarningExecutor())
+        for row in warnings:
+            dialog.add(row)
+        dialog.show()
+    else:
+        print("No issues found with malloc argument calculations.")
+
+# Represents a warning instance where a call to malloc is influenced by
+# arithmetic (ADD or MULT) involving a non-constant input.
+# Stores the function name, call site address, influencing operation address,
+# and the type of operation that influenced the allocation size.
+class MallocWarning(AddressableRowObject):
+    def __init__(self, funcName, callAddr, inflAddr, opType):
+        self.funcName = funcName
+        self._address = callAddr
+        self.inflAddr = inflAddr
+        self.opType = opType
+
+    def __str__(self):
+        return "{}: call at {} influenced by {} at {}".format(self.funcName, self._address, self.opType, self.inflAddr)
+
+    def getAddress(self):
+        return self._address
+
+check_program()
